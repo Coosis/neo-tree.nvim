@@ -17,6 +17,22 @@ local ESC_KEY = utils.keycode("<ESC>")
 local default_popup_size = { width = 60, height = "80%" }
 local draw, create_tree, render_tree
 
+-- Sidebars share their last width across sources and tabs for this session.
+local sidebar_widths = {}
+local remember_sidebar_width = function(state)
+  local position = state.current_position
+  if position ~= "left" and position ~= "right" then
+    return
+  end
+  if
+    state.winid
+    and vim.api.nvim_win_is_valid(state.winid)
+    and vim.api.nvim_win_get_buf(state.winid) == state.bufnr
+  then
+    sidebar_widths[position] = vim.api.nvim_win_get_width(state.winid)
+  end
+end
+
 local floating_windows = {}
 local update_floating_windows = function()
   local valid_windows = {}
@@ -116,6 +132,7 @@ M.close = function(state, focus_prior_window)
 
   local window_existed = M.window_exists(state)
   if window_existed then
+    remember_sidebar_width(state)
     log.debug("Closing window, but saving position first.")
     M.position.save(state, true)
     if state.current_position == "current" then
@@ -1111,6 +1128,15 @@ local attach_position_autocmds = function(state)
   local wait_for_restore = true
   local nt_bufnr = state.bufnr
 
+  autocmd("BufWinLeave", {
+    group = position_augroup,
+    buffer = nt_bufnr,
+    callback = function()
+      -- Also cover :close/:q and source changes, which can bypass M.close.
+      remember_sidebar_width(state)
+    end,
+  })
+
   autocmd("BufDelete", {
 
     group = position_augroup,
@@ -1318,6 +1344,9 @@ M.acquire_window = function(state)
     relative = relative,
     buf_options = vim.deepcopy(neo_tree_buffer_options),
   }
+  if state.current_position == "left" or state.current_position == "right" then
+    nui_win_options.size = sidebar_widths[state.current_position] or nui_win_options.size
+  end
 
   local event_args = {
     position = state.current_position,

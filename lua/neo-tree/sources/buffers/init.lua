@@ -23,6 +23,13 @@ local get_state = function()
   return manager.get_state(M.name)
 end
 
+local refresh_git_status = function(state)
+  local config = require("neo-tree").ensure_config()
+  if config.enable_git_status and state.path then
+    git.status_async(state.path, state.git_base_by_worktree, config.git_status_async_options)
+  end
+end
+
 local follow_internal = function()
   if vim.bo.filetype == "neo-tree" or vim.bo.filetype == "neo-tree-popup" then
     return
@@ -64,6 +71,7 @@ local buffers_changed_internal = function()
     local state = manager.get_state(M.name, tabid)
     if state.path and renderer.window_exists(state) then
       items.get_opened_buffers(state)
+      refresh_git_status(state)
       if state.follow_current_file.enabled then
         follow_internal()
       end
@@ -102,6 +110,7 @@ M.navigate = function(state, path, path_to_reveal, callback, async)
   end
 
   items.get_opened_buffers(state)
+  refresh_git_status(state)
 
   if path_changed and state.bind_to_cwd then
     vim.api.nvim_command("tcd " .. path)
@@ -138,20 +147,19 @@ M.setup = function(config, global_config)
         end
       end,
     })
-  elseif global_config.enable_git_status then
+  end
+
+  if global_config.enable_git_status then
     manager.subscribe(M.name, {
-      event = events.BEFORE_RENDER,
-      ---@param state neotree.State
-      handler = function(state)
-        local this_state = get_state()
-        if state == this_state then
-          git.status(state.path, state.git_base_by_worktree)
-        end
-      end,
+      event = events.GIT_STATUS_CHANGED,
+      handler = wrap(manager.git_status_changed),
     })
     manager.subscribe(M.name, {
       event = events.GIT_EVENT,
-      handler = M.buffers_changed,
+      handler = function()
+        -- Keep the model fresh even while this source is hidden.
+        manager._for_each_state(M.name, refresh_git_status)
+      end,
     })
   end
 
