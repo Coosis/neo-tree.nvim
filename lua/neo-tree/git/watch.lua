@@ -37,6 +37,12 @@ M.watch = function(worktree_root, git_dir)
     end, 5000, utils.debounce_strategy.CALL_LAST_ONLY)
 
     vim.schedule(function()
+      -- The repository model outlives its views. Refresh it even when no source
+      -- window is visible (or the Git source has never been opened).
+      if git.worktrees[worktree_root] then
+        local config = require("neo-tree").ensure_config()
+        git.status_async(worktree_root, nil, config.git_status_async_options)
+      end
       events.fire_event(events.GIT_EVENT)
     end)
   end)

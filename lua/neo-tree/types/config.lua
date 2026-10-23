@@ -53,6 +53,7 @@
 ---@field highlight_separator_active string?
 
 ---@class neotree.Config.GitStatusAsync
+---@field untracked_files "all"? Include individual untracked files in the shared snapshot.
 ---@field batch_size integer?
 ---@field batch_delay integer?
 ---@field max_lines integer?

@@ -29,6 +29,9 @@ local M = {}
 ---@field watcher neotree.sources.filesystem.Watcher?
 ---@field superproject_worktree_root string?
 ---@field status neotree.git.Status?
+---@field status_bases table<string, boolean>?
+---@field status_generation integer?
+---@field untracked_files "all"? Keep individual untracked files once requested by the Git source.
 ---@field status_progress neotree.git.WorktreeInfo.StatusProgress
 
 ---@class neotree.git.WorktreeInfo.StatusProgress
@@ -122,6 +125,13 @@ local raw_status_text_cache = setmetatable({}, weak_k)
 M._supported_status_porcelain_version = nil
 
 ---@return neotree.git._StatusPorcelainVersion highest_supported_porcelain_version_if_git
+local parse_status_porcelain_version = function(version_output)
+  local major_str, minor_str = version_output:match("(%d+)%.(%d+)")
+  local major, minor = tonumber(major_str), tonumber(minor_str)
+  local has_porcelain_v2 = major and (major > 2 or major == 2 and minor >= 12)
+  return has_porcelain_v2 and 2 or 1
+end
+
 local find_status_porcelain_version = function()
   if not vim.fn.executable("git") == 1 then
     log.debug("`git` not available")
@@ -132,12 +142,7 @@ local find_status_porcelain_version = function()
     log.warn("`git --version` failed")
     return false
   end
-  local version_output_str = table.concat(git_version_output, "\n")
-  local major_str, minor_str = version_output_str:match("(%d+)%.(%d+)")
-  local major, minor = tonumber(major_str), tonumber(minor_str)
-
-  local has_porcelain_v2 = major and major >= 2 and minor >= 12
-  return has_porcelain_v2 and 2 or 1
+  return parse_status_porcelain_version(table.concat(git_version_output, "\n"))
 end
 
 ---@return neotree.git._StatusPorcelainVersion highest_supported_porcelain_version_if_git
@@ -259,7 +264,13 @@ M.status = function(path, base_lookup, skip_bubbling, status_opts)
   -- Scope git status to the requested path when configured, so that in monorepos
   -- we don't scan the entire worktree root.
   local nt_config = require("neo-tree").config
-  if nt_config and nt_config.git_status_scope_to_path and path ~= worktree_root then
+  local worktree = M.worktrees[worktree_root]
+  worktree.status_generation = (worktree.status_generation or 0) + 1
+  if worktree.untracked_files == "all" then
+    -- Synchronous consumers (for example the buffers source) share this model too.
+    status_opts = vim.tbl_extend("force", status_opts or {}, { untracked_files = "all" })
+    status_opts.paths = nil
+  elseif nt_config and nt_config.git_status_scope_to_path and path ~= worktree_root then
     status_opts = status_opts or {}
     if not status_opts.paths then
       status_opts.paths = { path }
@@ -309,6 +320,12 @@ M.status = function(path, base_lookup, skip_bubbling, status_opts)
   return git_status, worktree_root, git_status_over_base
 end
 
+---@param context neotree.git.JobContext
+local current_status_job = function(context)
+  local worktree = M.worktrees[context.worktree_root]
+  return worktree == context.worktree and worktree.status_generation == context.generation
+end
+
 ---Creates a job for `git status`
 ---@param cmd string[] nil to use default of make_git_status_args, which includes all files
 ---@param context neotree.git.JobContext
@@ -316,6 +333,9 @@ end
 ---@param skip_bubbling boolean?
 local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
   utils.job(cmd, nil, function(code, stdout_chunks, stderr_chunks)
+    if not current_status_job(context) then
+      return
+    end
     if code ~= 0 then
       local err = log.at.warn.format(
         "git status async process exited abnormally, code: %s, %s, %s",
@@ -335,7 +355,6 @@ local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
       on_parsed(M.worktrees[context.worktree_root].status)
       return
     end
-    raw_status_text_cache[context.worktree_root] = status_text
 
     local status_iter = utils.gsplit_plain(status_text, "\000")
     local parsing_task = co.create(parser.parse_status_porcelain)
@@ -354,7 +373,11 @@ local git_status_job = function(cmd, context, on_parsed, skip_bubbling)
       context.batch_delay,
       first_output,
       function(success, status_or_err)
+        if not current_status_job(context) then
+          return
+        end
         if success then
+          raw_status_text_cache[context.worktree_root] = status_text
           on_parsed(status_or_err)
         else
           on_parsed(nil, status_or_err)
@@ -370,7 +393,21 @@ end
 ---@param opts neotree.Config.GitStatusAsync
 ---@param callback? fun(worktree-root: string?)
 M.status_async = function(path, base_lookup, opts, callback)
+  require("neo-tree").ensure_config()
   callback = callback or function() end
+  -- The first async scan must not synchronously probe Git's version either.
+  if M._supported_status_porcelain_version == nil then
+    utils.job({ "git", "--version" }, nil, function(code, stdout)
+      M._supported_status_porcelain_version = code == 0
+          and parse_status_porcelain_version(table.concat(stdout))
+        or false
+      M.status_async(path, base_lookup, opts, callback)
+    end)
+    return
+  elseif M._supported_status_porcelain_version == false then
+    callback(nil)
+    return
+  end
   M.find_worktree_info(path, function(worktree_root, git_dir, superproject_worktree_root)
     if not worktree_root then
       log.trace("status_async: not a git folder:", path)
@@ -383,6 +420,18 @@ M.status_async = function(path, base_lookup, opts, callback)
 
     try_register_worktree(worktree_root, git_dir, superproject_worktree_root)
 
+    -- The Git source needs individual files; later filesystem refreshes must not
+    -- replace its shared snapshot with collapsed untracked directories.
+    if opts.untracked_files == "all" then
+      local worktree = M.worktrees[worktree_root]
+      worktree.untracked_files = "all"
+      local base = base_lookup and base_lookup[worktree_root]
+      if base then
+        worktree.status_bases = worktree.status_bases or {}
+        worktree.status_bases[base] = true
+      end
+    end
+
     log.trace("git.status_async called for", worktree_root)
 
     local event_id = "git_status_async@" .. worktree_root
@@ -393,11 +442,23 @@ M.status_async = function(path, base_lookup, opts, callback)
           callback(nil)
           return
         end
+        local worktree = M.worktrees[worktree_root]
+        if not worktree then
+          callback(nil)
+          return
+        end
+        worktree.status_generation = (worktree.status_generation or 0) + 1
         local nt_config = require("neo-tree").ensure_config()
-        local scope_to_path = nt_config.git_status_scope_to_path and path ~= worktree_root
+        -- Once a Git source requests a complete model, filesystem scans must
+        -- preserve its repository-wide membership as well as untracked files.
+        local scope_to_path = nt_config.git_status_scope_to_path
+          and path ~= worktree_root
+          and M.worktrees[worktree_root].untracked_files ~= "all"
         local paths = scope_to_path and { path } or nil
         ---@class neotree.git.JobContext
         local ctx = {
+          generation = worktree.status_generation,
+          worktree = worktree,
           porcelain_version = git_status_porcelain_version,
           worktree_root = worktree_root,
           paths = paths,
@@ -415,6 +476,46 @@ M.status_async = function(path, base_lookup, opts, callback)
         -- If we haven't scanned this before, looking for untracked files will take the longest in most repos.
         -- It's more responsive to just run the status first without untracked/ignored files, and then get those parts
         -- later.
+        if existing_worktree.untracked_files == "all" then
+          -- One complete snapshot, even when a previous filesystem scan exists.
+          -- Never publish a partial scan which would remove untracked nodes.
+          local cmd = make_git_status_cmd(git_status_porcelain_version, worktree_root, {
+            untracked_files = "all",
+            paths = ctx.paths,
+          })
+          git_status_job(cmd, ctx, function(status)
+            if not status then
+              callback(nil)
+              return
+            end
+            change_worktree_git_status(worktree_root, status, nil, nil, {
+              tracked = true,
+              ignored = true,
+              untracked = true,
+            })
+            -- Filesystem refreshes may win the debounce. Retain the refs requested
+            -- by Git views so their diff snapshots still refresh while hidden.
+            local pending = vim.tbl_count(existing_worktree.status_bases or {})
+            if pending == 0 then
+              callback(worktree_root)
+            end
+            for diff_base in pairs(existing_worktree.status_bases or {}) do
+              git_diff.name_status_job(worktree_root, diff_base, false, ctx, function(ok, diff)
+                if not current_status_job(ctx) then
+                  return
+                end
+                if ok then
+                  change_worktree_git_status(worktree_root, status, diff_base, diff)
+                end
+                pending = pending - 1
+                if pending == 0 then
+                  callback(worktree_root)
+                end
+              end)
+            end
+          end)
+          return
+        end
         local status_existed = existing_worktree and existing_worktree.status
         local first_cmd = make_git_status_cmd(git_status_porcelain_version, worktree_root, {
           untracked_files = status_existed and "normal" or "no",
@@ -433,6 +534,9 @@ M.status_async = function(path, base_lookup, opts, callback)
 
           if base then
             git_diff.name_status_job(worktree_root, base, false, ctx, function(ok, status)
+              if not current_status_job(ctx) then
+                return
+              end
               if ok then
                 change_worktree_git_status(worktree_root, ctx.git_status, base, status)
               end
@@ -448,6 +552,9 @@ M.status_async = function(path, base_lookup, opts, callback)
 
           -- Get ignored statuses
           git_ls_files.ignored_job(ctx, function(ignored_paths, err)
+            if not current_status_job(ctx) then
+              return
+            end
             if not ignored_paths then
               log.error(err)
             end
@@ -470,6 +577,9 @@ M.status_async = function(path, base_lookup, opts, callback)
             }),
             nil,
             function(code, stdout_chunks, _)
+              if not current_status_job(ctx) then
+                return
+              end
               -- https://git-scm.com/docs/git-config
               -- This command will fail with non-zero status upon error. Some exit codes are:
               -- The section or key is invalid (ret=1),

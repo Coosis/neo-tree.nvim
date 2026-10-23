@@ -5,18 +5,20 @@ local git = require("neo-tree.git")
 
 local M = {}
 
----Get a table of all git statuses in the current repo, along with all parent paths.
----The paths are the keys of the table, and all the values are 'true'.
+---Render the shared worktree snapshot without running Git.
 ---@param state neotree.State
-M.get_git_status = function(state)
-  if state.loading then
-    return
+M.show_git_status = function(state)
+  local path = state.git_status_path or state.path
+  local project_root = path
+  local worktree = git.worktrees[project_root]
+  if not worktree then
+    project_root, worktree = git.find_existing_worktree(path)
   end
-  state.loading = true
-  local status_lookup, project_root, status_lookup_over_base =
-    git.status(state.path, state.git_base_by_worktree, false, {
-      untracked_files = "all",
-    })
+  local status_lookup = worktree and worktree.status
+  local base = project_root
+    and state.git_base_by_worktree
+    and state.git_base_by_worktree[project_root]
+  local status_lookup_over_base = worktree and base and worktree.status_diff[base]
   state.path = project_root or state.path or vim.fn.getcwd()
   local context = file_items.create_context()
   context.state = state
@@ -61,7 +63,23 @@ M.get_git_status = function(state)
   end
   file_items.advanced_sort(root.children, state)
   renderer.show_nodes({ root }, state)
-  state.loading = false
+end
+
+---Refresh the shared model, whether or not this source is visible.
+---@param state neotree.State
+M.refresh_git_status = function(state)
+  local opts = vim.tbl_extend("force", require("neo-tree").config.git_status_async_options, {
+    untracked_files = "all",
+  })
+  git.status_async(state.git_status_path or state.path, state.git_base_by_worktree, opts)
+end
+
+---Show cached results immediately, then refresh in the background.
+---@param state neotree.State
+M.get_git_status = function(state)
+  state.path = state.path or vim.fn.getcwd()
+  M.show_git_status(state)
+  M.refresh_git_status(state)
 end
 
 return M

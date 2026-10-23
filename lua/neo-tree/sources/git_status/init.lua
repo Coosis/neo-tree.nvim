@@ -24,7 +24,8 @@ end
 ---Navigate to the given path.
 ---@param path string Path to navigate to. If empty, will navigate to the cwd.
 M.navigate = function(state, path, path_to_reveal, callback, async)
-  state.path = path or state.path
+  state.git_status_path = path or state.git_status_path or state.path or vim.fn.getcwd()
+  state.path = state.git_status_path
   state.dirty = false
   if path_to_reveal then
     renderer.position.set(state, path_to_reveal)
@@ -37,7 +38,12 @@ M.navigate = function(state, path, path_to_reveal, callback, async)
 end
 
 M.refresh = function()
-  manager.refresh(M.name)
+  -- A hidden source still owns a model. Never gate Git updates on its window.
+  manager._for_each_state(M.name, function(state)
+    if state.path then
+      items.refresh_git_status(state)
+    end
+  end)
 end
 
 ---@class neotree.Config.GitStatus.Renderers : neotree.Config.Renderers
@@ -101,6 +107,26 @@ M.setup = function(config, global_config)
       handler = wrap(manager.opened_buffers_changed),
     })
   end
+
+  manager.subscribe(M.name, {
+    event = events.GIT_STATUS_CHANGED,
+    handler = function(args)
+      manager._for_each_state(M.name, function(state)
+        local path = state.git_status_path or state.path
+        local git = require("neo-tree.git")
+        local root = path and (git.worktrees[path] and path or git.find_existing_worktree(path))
+        if root == args.git_root then
+          state.path = args.git_root
+          if renderer.tree_is_visible(state) then
+            -- Rebuild membership (including deletions), without starting another scan.
+            items.show_git_status(state)
+          else
+            state.dirty = true
+          end
+        end
+      end)
+    end,
+  })
 
   manager.subscribe(M.name, {
     event = events.GIT_EVENT,

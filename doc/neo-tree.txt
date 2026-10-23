@@ -2317,6 +2317,18 @@ Unlike the other sources, this will always show the project root of the
 current working directory. If the working tree is clean, this view will be
 empty.
 
+The view displays the cached worktree snapshot immediately and refreshes it
+asynchronously. With no cached snapshot, it initially shows an empty root.
+Background updates continue while the Git source is hidden. Enable
+`filesystem.use_libuv_file_watcher = true` to refresh watched repositories after
+Git operations in another terminal, even when no source window is visible.
+The Git source uses asynchronous scans regardless of `git_status_async`.
+
+Once a Git source has been opened for a repository, its shared snapshot retains
+individual untracked files and covers the entire repository. Subsequent scans
+of that repository therefore ignore `git_status_scope_to_path` for the remainder
+of the session, so switching sources cannot discard Git view entries.
+
 This view has most file commands except for "add", plus the following git
 specific commands:
 >lua
