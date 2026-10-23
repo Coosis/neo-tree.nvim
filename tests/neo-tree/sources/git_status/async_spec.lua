@@ -282,4 +282,59 @@ describe("Asynchronous Git source", function()
     assert.is_not_nil(git.worktrees[root].status[root .. "/new/one.txt"])
     assert.is_not_nil(git.worktrees[root].status[root .. "/new/three.txt"])
   end)
+
+  for _, change_dir in ipairs({ "cd", "tcd", "lcd" }) do
+    for _, hidden in ipairs({ false, true }) do
+      it(
+        "follows :" .. change_dir .. " across repositories (hidden=" .. tostring(hidden) .. ")",
+        function()
+          require("neo-tree").setup({
+            git_status = {
+              bind_to_cwd = true,
+              -- A sidebar follows the tab cwd; a current-window tree follows :lcd.
+              window = { position = change_dir == "lcd" and "current" or "left" },
+            },
+            filesystem = { use_libuv_file_watcher = false },
+            buffers = {
+              before_render = function() end,
+              window = { position = change_dir == "lcd" and "current" or "left" },
+            },
+          })
+          local first = repo()
+          local second = repo()
+          open(first)
+          local state = manager.get_state(
+            "git_status",
+            nil,
+            change_dir == "lcd" and vim.api.nvim_get_current_win() or nil
+          )
+          wait_for(function()
+            return state.tree:get_node(first .. "/new/one.txt") ~= nil
+          end)
+          vim.api.nvim_set_current_win(state.winid)
+          if hidden then
+            open(first, "buffers")
+          end
+          vim.cmd(change_dir .. " " .. vim.fn.fnameescape(second))
+          wait_for(function()
+            return state.git_status_path == second
+              and git.worktrees[second]
+              and git.worktrees[second].status ~= nil
+          end)
+          -- Late notifications from the old repository cannot change the new root.
+          require("neo-tree.events").fire_event(require("neo-tree.events").GIT_STATUS_CHANGED, {
+            git_root = first,
+          })
+          if hidden then
+            assert.is_false(renderer.tree_is_visible(state))
+            command.execute({ source = "git_status", action = "show" })
+          end
+          wait_for(function()
+            return state.path == second and state.tree:get_node(second .. "/new/one.txt") ~= nil
+          end)
+          assert.is_nil(state.tree:get_node(first))
+        end
+      )
+    end
+  end
 end)

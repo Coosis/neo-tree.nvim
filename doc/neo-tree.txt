@@ -2323,6 +2323,9 @@ Background updates continue while the Git source is hidden. Enable
 `filesystem.use_libuv_file_watcher = true` to refresh watched repositories after
 Git operations in another terminal, even when no source window is visible.
 The Git source uses asynchronous scans regardless of `git_status_async`.
+Set `git_status.bind_to_cwd = true` to follow working-directory changes, including
+while the source is hidden. The displayed root remains the repository root;
+changing to another directory within that repository does not narrow the view.
 
 Once a Git source has been opened for a repository, its shared snapshot retains
 individual untracked files and covers the entire repository. Subsequent scans

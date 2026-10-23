@@ -46,6 +46,25 @@ M.refresh = function()
   end)
 end
 
+M.dir_changed = function()
+  manager._for_each_state(M.name, function(state)
+    local cwd = manager.get_cwd(state)
+    if cwd == state.git_status_path then
+      return
+    end
+    -- Keep the requested directory separate from the resolved repository root.
+    -- Hidden views must forget their old path too, before any scan completes.
+    state.git_status_path = cwd
+    state.path = cwd
+    state.dirty = true
+    if renderer.tree_is_visible(state) then
+      M.navigate(state, cwd)
+    else
+      items.refresh_git_status(state)
+    end
+  end)
+end
+
 ---@class neotree.Config.GitStatus.Renderers : neotree.Config.Renderers
 
 ---@class (exact) neotree.Config.GitStatus : neotree.Config.Source
@@ -83,7 +102,7 @@ M.setup = function(config, global_config)
   if config.bind_to_cwd then
     manager.subscribe(M.name, {
       event = events.VIM_DIR_CHANGED,
-      handler = M.refresh,
+      handler = M.dir_changed,
     })
   end
 
