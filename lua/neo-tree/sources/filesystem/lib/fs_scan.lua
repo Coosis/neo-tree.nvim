@@ -253,9 +253,13 @@ local job_complete = function(context, skip_render_context)
     mark_gitignored(state.path, context.all_items, context.nested_worktree_roots)
   end
   if not skip_render_context then
-    vim.schedule(function()
+    if context.render_before_vimenter then
       render_context(context)
-    end)
+    else
+      vim.schedule(function()
+        render_context(context)
+      end)
+    end
   end
   return context
 end
@@ -668,6 +672,7 @@ end
 ---@field parent_id string?
 ---@field callback function?
 ---@field async boolean?
+---@field render_before_vimenter boolean?
 ---@field root neotree.FileItem.Directory|neotree.FileItem.Link
 ---@field directories_scanned integer?
 ---@field directories_to_scan integer?
@@ -707,6 +712,7 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
   context.path_to_reveal = path_to_reveal
   context.recursive = recursive
   context.callback = callback
+  context.render_before_vimenter = vim.v.vim_did_enter == 0 and not async_dir_scan
   context.nested_worktree_roots = {}
   -- Create root folder
   local root = file_items.create_item(context, parent_id or state.path, "directory") --[[@as neotree.FileItem.Directory]]

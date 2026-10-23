@@ -1282,6 +1282,12 @@ open_default (default) Netrw disabled, opening a directory opens neo-tree
 open_current           Netrw disabled, opening a directory opens within the
                        window like netrw would, regardless of `window.position`.
 
+With the default `async_directory_scan = "auto"`, startup directory hijacks
+finish the initial listing and render before VimEnter, so the first UI frame
+contains the tree rather than an intermediate empty buffer. Directory opens
+after startup remain asynchronous. Setting `async_directory_scan = "always"`
+explicitly keeps the initial scan asynchronous too.
+
 >lua
     require("neo-tree").setup({
       filesystem = {
